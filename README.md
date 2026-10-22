@@ -13,6 +13,7 @@ retrieval, hybrid fusion (RRF), evaluation and LLM generation are not implemente
 ```
 src/bm25/prepare_data.py   BEIR corpus.jsonl -> Pyserini JsonCollection ({id, contents})
 src/bm25/build_index.py    Lucene index build + smoke test + build record
+src/bm25/search_app.py     local web UI / JSON API for trying BM25 queries
 tests/                     pytest suite (synthetic 4-doc fixture, not NFCorpus)
 results/bm25/index_build.json   build record written by build_index.py
 data/raw/nfcorpus/         original BEIR NFCorpus (read-only, git-ignored)
@@ -108,6 +109,31 @@ The build record `results/bm25/index_build.json` contains:
 - smoke-test hits
 - software versions: Python, Pyserini, pyjnius, Anserini jar, Lucene, Java, OS
 - git commit and timestamp
+
+### 4. Try queries in the browser
+
+```bash
+python -m src.bm25.search_app                      # http://127.0.0.1:8000
+python -m src.bm25.search_app --index-dir indexes/bm25/nfcorpus-flat --port 8080
+```
+
+This is a small Flask app that opens the index read-only. Each query lets you set
+`top-k`, `k1` and `b` (defaults come from `bm25_params.json`). The page shows:
+
+- the analyzed query terms (after stopword removal and Porter stemming) with
+  their `df` and IDF
+- the ranked hits with BM25 score and document length
+- each term's share of the score; these add up to the Lucene score
+- the document text with matched terms highlighted
+
+The same data is available as JSON:
+
+```bash
+curl "http://127.0.0.1:8000/api/search?q=vitamin+d+cancer&k=10&k1=0.9&b=0.4"
+```
+
+The latency shown is the wall-clock time of the Lucene search call on that machine.
+It is meant for interactive use, not as a benchmark.
 
 ## Tests
 
