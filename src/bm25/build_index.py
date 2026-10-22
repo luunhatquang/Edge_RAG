@@ -223,6 +223,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.error("--k1 must be >= 0")
     if not 0 <= args.b <= 1:
         p.error("--b must be in [0, 1]")
+    if args.threads < 1:
+        p.error("--threads must be >= 1")
+    if args.smoke_k < 1:
+        p.error("--smoke-k must be >= 1")
     return args
 
 

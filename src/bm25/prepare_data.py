@@ -25,6 +25,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
@@ -71,12 +72,17 @@ def download_nfcorpus(raw_dir: Path, url: str = NFCORPUS_URL, expected_md5: str 
         return
     if raw_dir.exists() and any(raw_dir.iterdir()):
         sys.exit(f"[download] {raw_dir} exists but has no corpus.jsonl; refusing to touch it. Remove it manually.")
+    if raw_dir.exists():
+        raw_dir.rmdir()  # empty; shutil.move would otherwise nest the data inside it
 
     raw_dir.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=raw_dir.parent) as tmp:
         zip_path = Path(tmp) / "nfcorpus.zip"
         print(f"[download] Fetching {url}")
-        urllib.request.urlretrieve(url, zip_path)
+        try:
+            urllib.request.urlretrieve(url, zip_path)
+        except urllib.error.URLError as e:
+            sys.exit(f"[download] Failed to download {url}: {e}")
         md5 = file_hash(zip_path, "md5")
         print(f"[download] MD5 {md5}")
         if expected_md5 and md5 != expected_md5:

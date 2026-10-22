@@ -61,3 +61,40 @@ def test_duplicate_ids_rejected(raw_dir, tmp_path):
 def test_missing_corpus_exits(tmp_path):
     with pytest.raises(SystemExit):
         prepare_data.prepare(tmp_path / "nope", tmp_path / "processed")
+
+
+def make_zip(tmp_path, raw_dir):
+    import zipfile
+
+    zip_path = tmp_path / "nfcorpus.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.write(raw_dir / "corpus.jsonl", "nfcorpus/corpus.jsonl")
+    return zip_path
+
+
+@pytest.mark.parametrize("pre_create_empty_dir", [False, True])
+def test_download_extracts_read_only(raw_dir, tmp_path, pre_create_empty_dir):
+    zip_path = make_zip(tmp_path, raw_dir)
+    target = tmp_path / "dl" / "nfcorpus"
+    if pre_create_empty_dir:
+        target.mkdir(parents=True)
+    md5 = prepare_data.file_hash(zip_path, "md5")
+    prepare_data.download_nfcorpus(target, url=zip_path.as_uri(), expected_md5=md5)
+    corpus = target / "corpus.jsonl"
+    assert corpus.read_bytes() == (raw_dir / "corpus.jsonl").read_bytes()
+    assert not corpus.stat().st_mode & 0o222
+
+
+def test_download_md5_mismatch_aborts(raw_dir, tmp_path):
+    zip_path = make_zip(tmp_path, raw_dir)
+    target = tmp_path / "dl" / "nfcorpus"
+    with pytest.raises(SystemExit, match="MD5 mismatch"):
+        prepare_data.download_nfcorpus(target, url=zip_path.as_uri(), expected_md5="0" * 32)
+    assert not target.exists()
+
+
+def test_download_network_error_exits_cleanly(tmp_path):
+    target = tmp_path / "dl" / "nfcorpus"
+    with pytest.raises(SystemExit, match="Failed to download"):
+        prepare_data.download_nfcorpus(target, url=(tmp_path / "missing.zip").as_uri())
+    assert not target.exists()
