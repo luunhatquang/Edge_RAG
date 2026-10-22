@@ -15,7 +15,7 @@ and LLM generation are not implemented yet.
 src/bm25/prepare_data.py      BEIR corpus.jsonl -> Pyserini JsonCollection ({id, contents})
 src/bm25/build_index.py       Lucene index build + smoke test + build record
 src/bm25/search_app.py        Local web UI / JSON API for trying BM25 queries
-src/bm25/evaluate.py          Shared query/qrels loaders + trec_eval metrics (NDCG@10, MAP@10, R@100/1000, MRR@10)
+src/bm25/evaluate.py          Evaluation helpers + CLI evaluator on official test split
 src/bm25/tune.py              Automatic BM25 k1/b tuning on the dev split (grid or Optuna TPE)
 scripts/run_pipeline.sh       One-shot script: prepare → build → test
 scripts/test_retrieval.py     Chạy BM25 queries + tính nDCG@10 trên NFCorpus test split
@@ -23,9 +23,12 @@ tests/test_prepare_data.py    Unit tests: corpus conversion, download, overwrite
 tests/test_build_index.py     Integration test: build index trên 4-doc fixture
 tests/test_real_index.py      Integration test: kiểm tra index với dữ liệu NFCorpus thực
 tests/test_tune.py            Tuning tests trên fixture (grid, resume, TPE, lỗi trial, chặn test split)
+tests/test_evaluate.py        Unit/Integration tests cho pipeline đánh giá (test split)
 results/bm25/index_build.json Build record (git-ignored)
 results/bm25/tuning_results.csv  One row per tuning trial (git-ignored)
 results/bm25/best_config.json    Best k1/b on dev + metrics + environment (git-ignored)
+results/bm25/nfcorpus_test.run   TREC run file trên test split (git-ignored)
+results/bm25/evaluation.json     Báo cáo metric chính thức trên test split (git-ignored)
 data/nfcorpus/                NFCorpus gốc (corpus.jsonl, queries.jsonl, qrels/)
 data/processed/nfcorpus/      corpus/docs.jsonl + manifest.json (git-ignored)
 indexes/bm25/nfcorpus-flat/   Lucene index (git-ignored)
@@ -242,6 +245,40 @@ earlier trials are loaded into the Optuna study first.
 Tuning never writes to `data/` or the index, and never touches
 `results/bm25/index_build.json`.
 
+## Stage 3: Evaluation on official NFCorpus test split
+
+Chạy đánh giá toàn diện BM25 retrieval trên toàn bộ 323 queries thuộc tập test chính thức của NFCorpus:
+
+```bash
+# Đánh giá với cấu hình mặc định (k1=0.9, b=0.4, top_k=1000):
+python -m src.bm25.evaluate
+
+# Hoặc truyền cấu hình tùy biến (ví dụ từ kết quả tune dev split):
+python -m src.bm25.evaluate --k1 1.2 --b 0.75 --k 1000 --threads 4
+```
+
+Script thực hiện:
+1. Nạp 323 test query IDs từ `data/nfcorpus/qrels/test.tsv` và trích xuất câu truy vấn tương ứng từ `data/nfcorpus/queries.jsonl`.
+2. Chạy batch retrieval top-1000 tài liệu qua Pyserini `LuceneSearcher`.
+3. Ghi file kết quả định dạng chuẩn TREC 6 cột: `results/bm25/nfcorpus_test.run`.
+4. Đánh giá kết quả bằng `TrecEvaluator` (`io.anserini.eval.TrecEval`, chuẩn trec_eval 9.0.4) với các metric chính thức:
+   - `NDCG@10`
+   - `MAP@10`
+   - `Recall@100`
+   - `Recall@1000`
+   - `MRR@10`
+5. Xuất báo cáo chi tiết đầy đủ tham số, phiên bản môi trường vào `results/bm25/evaluation.json`.
+
+**Kết quả thực tế (Official NFCorpus Test Split, 323 queries):**
+
+| Metric | Kết quả đạt được | BEIR BM25 Baseline tham chiếu |
+|--------|:----------------:|:-----------------------------:|
+| **`NDCG@10`** | **0.32180** | ~0.325 |
+| **`MAP@10`** | **0.12140** | — |
+| **`Recall@100`** | **0.24570** | — |
+| **`Recall@1000`** | **0.37040** | — |
+| **`MRR@10`** | **0.52380** | — |
+
 ## Tests
 
 ```bash
@@ -250,6 +287,9 @@ python -m pytest -q
 
 # Termasuk test với dữ liệu NFCorpus thực (cần index đã build)
 python -m pytest -q tests/test_real_index.py -v
+
+# Chạy test đánh giá:
+python -m pytest -q tests/test_evaluate.py -v
 
 # Chạy hết tất cả:
 python -m pytest -v
@@ -262,6 +302,7 @@ python -m pytest -v
 | `test_real_index.py` | Integration: kiểm tra index thực với NFCorpus (skip nếu chưa build) |
 | `test_search_app.py` | Web UI / JSON API trên index fixture |
 | `test_tune.py` | Tuning: grid, resume, TPE (skip nếu chưa cài Optuna), lỗi trial, metric so với tính tay |
+| `test_evaluate.py` | Evaluation: nạp qrels/queries, ghi TREC run, TrecEvaluator metrics |
 
 `test_real_index.py` kiểm tra:
 - Số document khớp với corpus gốc (3633)
