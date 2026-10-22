@@ -11,14 +11,18 @@ retrieval, hybrid fusion (RRF), evaluation and LLM generation are not implemente
 ## Layout
 
 ```
-src/bm25/prepare_data.py   BEIR corpus.jsonl -> Pyserini JsonCollection ({id, contents})
-src/bm25/build_index.py    Lucene index build + smoke test + build record
-src/bm25/search_app.py     local web UI / JSON API for trying BM25 queries
-tests/                     pytest suite (synthetic 4-doc fixture, not NFCorpus)
-results/bm25/index_build.json   build record written by build_index.py
-data/raw/nfcorpus/         original BEIR NFCorpus (read-only, git-ignored)
-data/processed/nfcorpus/   corpus/docs.jsonl + manifest.json (git-ignored)
-indexes/bm25/nfcorpus-flat/  Lucene index (git-ignored)
+src/bm25/prepare_data.py      BEIR corpus.jsonl -> Pyserini JsonCollection ({id, contents})
+src/bm25/build_index.py       Lucene index build + smoke test + build record
+src/bm25/search_app.py        Local web UI / JSON API for trying BM25 queries
+scripts/run_pipeline.sh       One-shot script: prepare → build → test
+scripts/test_retrieval.py     Chạy BM25 queries + tính nDCG@10 trên NFCorpus test split
+tests/test_prepare_data.py    Unit tests: corpus conversion, download, overwrite guard
+tests/test_build_index.py     Integration test: build index trên 4-doc fixture
+tests/test_real_index.py      Integration test: kiểm tra index với dữ liệu NFCorpus thực
+results/bm25/index_build.json Build record (git-ignored)
+data/nfcorpus/                NFCorpus gốc (corpus.jsonl, queries.jsonl, qrels/)
+data/processed/nfcorpus/      corpus/docs.jsonl + manifest.json (git-ignored)
+indexes/bm25/nfcorpus-flat/   Lucene index (git-ignored)
 ```
 
 ## Requirements
@@ -36,9 +40,34 @@ pip install -r requirements.txt
 java -version          # must report 21.x
 ```
 
+## Quickstart (dữ liệu NFCorpus đã có sẵn)
+
+Nếu `data/nfcorpus/` đã có sẵn (corpus.jsonl, queries.jsonl, qrels/), chạy toàn bộ pipeline:
+
+```bash
+bash scripts/run_pipeline.sh
+# hoặc build lại từ đầu:
+bash scripts/run_pipeline.sh --rebuild
+```
+
+Hoặc từng bước:
+
+```bash
+# Bước 1: Chuyển corpus sang Pyserini format
+python -m src.bm25.prepare_data --raw-dir data/nfcorpus
+
+# Bước 2: Build Lucene BM25 index
+python -m src.bm25.build_index --prepared-dir data/processed/nfcorpus
+
+# Bước 3: Test retrieval (nDCG@10 trên 50 test queries)
+python scripts/test_retrieval.py --queries 50 --verbose
+```
+
 ## Stage 1: data preparation and BM25 index
 
 ### 1. Get NFCorpus
+
+NFCorpus đã có sẵn tại `data/nfcorpus/`. Nếu cần tải lại:
 
 ```bash
 python -m src.bm25.prepare_data --download-only
@@ -61,6 +90,10 @@ Expected contents: `corpus.jsonl`, `queries.jsonl`, `qrels/{train,dev,test}.tsv`
 ### 2. Prepare the Pyserini corpus
 
 ```bash
+# Nếu dùng data/nfcorpus/ (đã có sẵn):
+python -m src.bm25.prepare_data --raw-dir data/nfcorpus
+
+# Nếu đã download về data/raw/nfcorpus/ (mặc định):
 python -m src.bm25.prepare_data            # add --rebuild to regenerate
 ```
 
@@ -138,15 +171,24 @@ It is meant for interactive use, not as a benchmark.
 ## Tests
 
 ```bash
+# Unit tests + integration (synthetic fixture)
 python -m pytest -q
+
+# Termasuk test với dữ liệu NFCorpus thực (cần index đã build)
+python -m pytest -q tests/test_real_index.py -v
+
+# Chạy hết tất cả:
+python -m pytest -v
 ```
 
-The tests use a synthetic 4-document BEIR-format fixture. They cover:
+| Test file | Mô tả |
+|-----------|-------|
+| `test_prepare_data.py` | Unit tests: ID preservation, hash check, overwrite guard, download |
+| `test_build_index.py` | Integration: build Lucene index trên 4-doc fixture (cần pyserini) |
+| `test_real_index.py` | Integration: kiểm tra index thực với NFCorpus (skip nếu chưa build) |
 
-- ID preservation
-- the raw data staying unchanged
-- overwrite protection and `--rebuild`
-- rejection of duplicate IDs
-- a real Pyserini index build, open and query (skipped if Pyserini isn't installed)
-
-They produce no benchmark numbers.
+`test_real_index.py` kiểm tra:
+- Số document khớp với corpus gốc (3633)
+- Doc IDs truy xuất được
+- BM25 scores giảm dần theo rank
+- Mean nDCG@10 ≥ 0.28 trên 50 test queries

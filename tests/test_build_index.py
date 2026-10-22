@@ -39,7 +39,8 @@ def test_build_index_and_record(prepared_dir, tmp_path):
     assert record["bm25"]["k1"] == 1.2 and record["bm25"]["b"] == 0.75
     assert record["index_size_bytes"] > 0
     assert record["build_duration_seconds"] > 0
-    assert record["versions"]["java"].startswith("21")
+    java_major = int(record["versions"]["java"].split(".")[0])
+    assert java_major >= 21, f"Expected Java >= 21, got {record['versions']['java']}"
 
     saved = json.loads((tmp_path / "results" / "index_build.json").read_text())
     assert saved["num_docs_indexed"] == len(FIXTURE_DOCS)

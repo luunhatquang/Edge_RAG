@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# Datasets and indexes are reproducible and not committed.
-data/
+# Generated data and indexes are reproducible and not committed.
+data
 indexes/
+results/
+
