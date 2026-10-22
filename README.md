@@ -5,9 +5,10 @@ Research code for retrieval-augmented generation on edge devices, using the
 [BEIR](https://github.com/beir-cellar/beir) format.
 
 **Current status:** NFCorpus data preparation, a BM25 Lucene index built with
-[Pyserini](https://github.com/castorini/pyserini) (stage 1), and automatic BM25
-k1/b tuning on the dev split (stage 2). RM3, dense retrieval, hybrid fusion (RRF)
-and LLM generation are not implemented yet.
+[Pyserini](https://github.com/castorini/pyserini) (stage 1), automatic BM25
+k1/b tuning on the dev split (stage 2), evaluation on the test split (stage 3),
+and BM25 vs BM25+RM3 comparison and RM3 tuning on the dev split (stage 4).
+Dense retrieval, hybrid fusion (RRF) and LLM generation are not implemented yet.
 
 ## Layout
 
@@ -17,6 +18,7 @@ src/bm25/build_index.py       Lucene index build + smoke test + build record
 src/bm25/search_app.py        Local web UI / JSON API for trying BM25 queries
 src/bm25/evaluate.py          Evaluation helpers + CLI evaluator on official test split
 src/bm25/tune.py              Automatic BM25 k1/b tuning on the dev split (grid or Optuna TPE)
+src/bm25/evaluate_rm3.py      BM25 vs BM25+RM3 on the dev split, RM3 grid tuning, latency/RAM cost
 scripts/run_pipeline.sh       One-shot script: prepare → build → test
 scripts/test_retrieval.py     Chạy BM25 queries + tính nDCG@10 trên NFCorpus test split
 tests/test_prepare_data.py    Unit tests: corpus conversion, download, overwrite guard
@@ -24,11 +26,13 @@ tests/test_build_index.py     Integration test: build index trên 4-doc fixture
 tests/test_real_index.py      Integration test: kiểm tra index với dữ liệu NFCorpus thực
 tests/test_tune.py            Tuning tests trên fixture (grid, resume, TPE, lỗi trial, chặn test split)
 tests/test_evaluate.py        Unit/Integration tests cho pipeline đánh giá (test split)
+tests/test_evaluate_rm3.py    RM3 tests trên fixture (so sánh, L9/27 grid, resume, chặn test split, index thiếu docvectors)
 results/bm25/index_build.json Build record (git-ignored)
 results/bm25/tuning_results.csv  One row per tuning trial (git-ignored)
 results/bm25/best_config.json    Best k1/b on dev + metrics + environment (git-ignored)
 results/bm25/nfcorpus_test.run   TREC run file trên test split (git-ignored)
 results/bm25/evaluation.json     Báo cáo metric chính thức trên test split (git-ignored)
+results/rm3/                     RM3 dev results: tuning_results.csv, dev_comparison.json, best_config.json, rm3_dev.run, bm25_dev.run (git-ignored)
 data/nfcorpus/                NFCorpus gốc (corpus.jsonl, queries.jsonl, qrels/)
 data/processed/nfcorpus/      corpus/docs.jsonl + manifest.json (git-ignored)
 indexes/bm25/nfcorpus-flat/   Lucene index (git-ignored)
@@ -279,6 +283,68 @@ Script thực hiện:
 | **`Recall@1000`** | **0.37040** | — |
 | **`MRR@10`** | **0.52380** | — |
 
+## Stage 4: RM3 pseudo-relevance feedback (dev split)
+
+`src/bm25/evaluate_rm3.py` compares **BM25** with **BM25 + RM3** on the NFCorpus
+dev split, then optionally tunes RM3 there. It reuses the existing pieces:
+
+- the Lucene index from `build_index`. RM3 needs document vectors, which that
+  index stores (`--storeDocvectors`). The index is opened read-only and never rebuilt.
+- `tune.load_split` for the dev queries and qrels. It stops if `dev.tsv` is
+  missing or if dev overlaps test, and `--split test` isn't accepted.
+- `TrecEvaluator` for the metrics (trec_eval 9.0.4): NDCG@10, MAP@10,
+  Recall@100, Recall@1000 and MRR@10.
+- `TrialLog` for the CSV checkpoint and resume.
+
+```bash
+python -m src.bm25.evaluate_rm3                         # BM25 vs RM3 default
+python -m src.bm25.evaluate_rm3 --tune --resume         # + full RM3 grid (27 configs), continues the CSV
+python -m src.bm25.evaluate_rm3 --tune --grid l9        # or the 9-config L9 design (fresh output dir)
+python -m src.bm25.evaluate_rm3 --k1 1.7 --b 0.4 --fb-docs 10 --fb-terms 10 --original-query-weight 0.5
+```
+
+**Configurations.**
+
+- **BM25:** k1=1.7, b=0.4 by default. Both methods use the same values. The
+  script warns if they differ from `results/bm25/best_config.json`.
+- **RM3 default:** fb_docs=10, fb_terms=10, original_query_weight=0.5.
+- **`--tune` grid:** fb_docs {5,10,20} × fb_terms {10,20,30} ×
+  original_query_weight {0.3,0.5,0.7}.
+  - `--grid full` runs all 27 configurations.
+  - `--grid l9` runs a 9-configuration L9 orthogonal array, where every pair of
+    levels of any two parameters appears exactly once. It includes the default.
+- The best RM3 configuration is the one with the highest dev NDCG@10.
+
+**How it measures.** Each configuration is run query by query with
+`LuceneSearcher.search` on one thread, after a JVM warm-up (`--warmup-queries 50`).
+That single pass gives both the metrics and the per-query latency (mean, p50, p95).
+
+Each trial also records:
+
+- the JVM heap and the process RSS
+- the JVM start time and `LuceneSearcher` initialization time
+- the index size and the peak RSS
+
+At the end, the baseline, the default RM3 and the best RM3 are run again. This
+writes the run files, checks that the metrics come out the same, and compares
+per-query NDCG@10 with a paired t-test and a Wilcoxon test (with
+wins/losses/ties). If the BM25 tuning CSV has the same k1/b, the baseline is
+also checked against it.
+
+**Outputs (in `results/rm3/`).**
+
+| File | Contents |
+|---|---|
+| `tuning_results.csv` | one row per trial, appended and fsync'ed. Failed trials have `status=error` and their message |
+| `dev_comparison.json` | BM25 vs RM3 default vs RM3 best: metrics, deltas, significance, latency/RAM cost, selection rule, versions, warnings |
+| `best_config.json` | best RM3 configuration on dev, with metrics and comparison to BM25 |
+| `rm3_dev.run`, `bm25_dev.run` | TREC runs of the best RM3 and the BM25 baseline on dev |
+
+Without `--resume`, the script refuses to touch an existing `tuning_results.csv`.
+The test split is not evaluated here. The best RM3 is chosen and measured on the
+same dev queries, so its dev scores are optimistic; confirm on test once, with
+`python -m src.bm25.evaluate --output-json` set to a new path.
+
 ## Tests
 
 ```bash
@@ -303,6 +369,7 @@ python -m pytest -v
 | `test_search_app.py` | Web UI / JSON API trên index fixture |
 | `test_tune.py` | Tuning: grid, resume, TPE (skip nếu chưa cài Optuna), lỗi trial, metric so với tính tay |
 | `test_evaluate.py` | Evaluation: nạp qrels/queries, ghi TREC run, TrecEvaluator metrics |
+| `test_evaluate_rm3.py` | RM3: so sánh BM25/RM3, L9 + 27 grid, resume, chỉ dev qrels, index thiếu docvectors, CLI tiến trình mới |
 
 `test_real_index.py` kiểm tra:
 - Số document khớp với corpus gốc (3633)
