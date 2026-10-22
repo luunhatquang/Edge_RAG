@@ -1,0 +1,3 @@
+# Optional: only needed for `python -m src.bm25.tune --method tpe`.
+# Optuna 5.0.0 supports Python >= 3.9 and is pure Python (no Java or Pyserini constraints).
+optuna==5.0.0

@@ -11,7 +11,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import sys
 from pathlib import Path
@@ -19,35 +18,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+from src.bm25.evaluate import load_qrels, load_queries  # noqa: E402
+
 INDEX_DIR = REPO_ROOT / "indexes" / "bm25" / "nfcorpus-flat"
 QUERIES_FILE = REPO_ROOT / "data" / "nfcorpus" / "queries.jsonl"
 QRELS_FILE = REPO_ROOT / "data" / "nfcorpus" / "qrels" / "test.tsv"
-
-
-def load_queries(path: Path, limit: int | None = None) -> list[dict]:
-    queries = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                queries.append(json.loads(line))
-    return queries[:limit] if limit else queries
-
-
-def load_qrels(path: Path) -> dict[str, dict[str, int]]:
-    """qrels[query_id][doc_id] = relevance_score"""
-    qrels: dict[str, dict[str, int]] = {}
-    with open(path, encoding="utf-8") as f:
-        header = True
-        for line in f:
-            if header:
-                header = False
-                continue
-            parts = line.strip().split("\t")
-            if len(parts) < 3:
-                continue
-            qid, did, score = parts[0], parts[1], int(parts[2])
-            qrels.setdefault(qid, {})[did] = score
-    return qrels
 
 
 def dcg(relevances: list[int]) -> float:
