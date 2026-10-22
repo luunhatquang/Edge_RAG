@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Datasets and indexes are reproducible and not committed.
+data/
+indexes/

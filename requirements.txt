@@ -1,0 +1,3 @@
+# Requires Python >= 3.12 and Java 21 (JDK) on PATH / JAVA_HOME.
+pyserini==2.4.0
+pytest
