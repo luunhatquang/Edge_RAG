@@ -112,6 +112,9 @@ class TrecEvaluator:
     """
 
     def __init__(self, qrels: dict[str, dict[str, int]]):
+        # Importing Pyserini first puts the Anserini jar on the JVM classpath; starting
+        # the JVM through jnius directly would leave io.anserini.eval.TrecEval unloadable.
+        import pyserini.search.lucene  # noqa: F401
         from jnius import autoclass
 
         self._trec_eval = autoclass("io.anserini.eval.TrecEval")

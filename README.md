@@ -7,8 +7,9 @@ Research code for retrieval-augmented generation on edge devices, using the
 **Current status:** NFCorpus data preparation, a BM25 Lucene index built with
 [Pyserini](https://github.com/castorini/pyserini) (stage 1), automatic BM25
 k1/b tuning on the dev split (stage 2), evaluation on the test split (stage 3),
-and BM25 vs BM25+RM3 comparison and RM3 tuning on the dev split (stage 4).
-Dense retrieval, hybrid fusion (RRF) and LLM generation are not implemented yet.
+BM25 vs BM25+RM3 comparison and RM3 tuning on the dev split (stage 4), and dense
+retrieval with bekko-embedding-v1-a8m on the dev split (stage 5). Hybrid fusion
+(RRF) and LLM generation are not implemented yet.
 
 ## Layout
 
@@ -19,6 +20,8 @@ src/bm25/search_app.py        Local web UI / JSON API for trying BM25 queries
 src/bm25/evaluate.py          Evaluation helpers + CLI evaluator on official test split
 src/bm25/tune.py              Automatic BM25 k1/b tuning on the dev split (grid or Optuna TPE)
 src/bm25/evaluate_rm3.py      BM25 vs BM25+RM3 on the dev split, RM3 grid tuning, latency/RAM cost
+src/dense/build_index.py      Encode the corpus with bekko-embedding-v1-a8m into a dense index (.npy)
+src/dense/evaluate_dense.py   Dense vs BM25 on the dev split, Matryoshka dims, latency/RAM cost
 scripts/run_pipeline.sh       One-shot script: prepare → build → test
 scripts/test_retrieval.py     Chạy BM25 queries + tính nDCG@10 trên NFCorpus test split
 tests/test_prepare_data.py    Unit tests: corpus conversion, download, overwrite guard
@@ -26,16 +29,20 @@ tests/test_build_index.py     Integration test: build index trên 4-doc fixture
 tests/test_real_index.py      Integration test: kiểm tra index với dữ liệu NFCorpus thực
 tests/test_tune.py            Tuning tests trên fixture (grid, resume, TPE, lỗi trial, chặn test split)
 tests/test_evaluate.py        Unit/Integration tests cho pipeline đánh giá (test split)
+tests/test_dense.py           Dense tests với mô hình ModernBERT tí hon tạo offline (không cần tải bekko)
 tests/test_evaluate_rm3.py    RM3 tests trên fixture (so sánh, L9/27 grid, resume, chặn test split, index thiếu docvectors)
 results/bm25/index_build.json Build record (git-ignored)
 results/bm25/tuning_results.csv  One row per tuning trial (git-ignored)
 results/bm25/best_config.json    Best k1/b on dev + metrics + environment (git-ignored)
 results/bm25/nfcorpus_test.run   TREC run file trên test split (git-ignored)
 results/bm25/evaluation.json     Báo cáo metric chính thức trên test split (git-ignored)
+results/dense/                   Dense dev results: dev_results.json, dense_dev_<dim>.run (git-ignored)
 results/rm3/                     RM3 dev results: tuning_results.csv, dev_comparison.json, best_config.json, rm3_dev.run, bm25_dev.run (git-ignored)
 data/nfcorpus/                NFCorpus gốc (corpus.jsonl, queries.jsonl, qrels/)
 data/processed/nfcorpus/      corpus/docs.jsonl + manifest.json (git-ignored)
 indexes/bm25/nfcorpus-flat/   Lucene index (git-ignored)
+indexes/dense/bekko-embedding-v1-a8m/  Dense index: embeddings.npy + docids.json + manifest.json (git-ignored)
+models/                       Optional local copy of the embedding model (git-ignored)
 ```
 
 ## Requirements
@@ -345,6 +352,57 @@ The test split is not evaluated here. The best RM3 is chosen and measured on the
 same dev queries, so its dev scores are optimistic; confirm on test once, with
 `python -m src.bm25.evaluate --output-json` set to a new path.
 
+## Stage 5: dense retrieval with bekko-embedding-v1-a8m (dev split)
+
+[`hotchpotch/bekko-embedding-v1-a8m`](https://huggingface.co/hotchpotch/bekko-embedding-v1-a8m)
+is a multilingual embedding model released under the MIT license. Its model card describes:
+
+- an mmBERT-based encoder with 4 layers and about 7.7M active parameters
+- 384-dimensional embeddings that can be truncated to 256, 128 or 64 (Matryoshka)
+- mean pooling and cosine similarity, with up to 8192 tokens of input
+- **no query or document prefixes**
+
+The card recommends Sentence Transformers ≥ 5 and Transformers ≥ 5.12.
+
+```bash
+pip install -r requirements-dense.txt        # sentence-transformers==6.2.0 (other deps already installed)
+
+# 1. Encode the prepared corpus (same docs.jsonl as BM25, so the IDs match)
+python -m src.dense.build_index              # → indexes/dense/bekko-embedding-v1-a8m/
+#    Offline / blocked Hugging Face: download the model elsewhere, then
+#    hf download hotchpotch/bekko-embedding-v1-a8m --local-dir models/bekko-embedding-v1-a8m
+#    python -m src.dense.build_index --model models/bekko-embedding-v1-a8m
+
+# 2. Dense vs BM25 (k1=1.7, b=0.4) on dev, at several Matryoshka sizes
+python -m src.dense.evaluate_dense --dims 384,256,128,64
+```
+
+**`build_index`**
+
+- Encodes `contents` (`title + " " + text`) on the CPU, L2-normalised, with
+  `--max-length 512` tokens by default (the model accepts up to 8192).
+- Writes three files:
+  - `embeddings.npy`: float32, 3,633 × 384, about 5.6 MB
+  - `docids.json`
+  - `manifest.json`: model, max length, corpus SHA-256, number of truncated
+    documents, docs/s, and versions
+- Refuses to overwrite an existing index without `--rebuild`.
+
+**`evaluate_dense`**
+
+- Loads the queries and qrels with the same `load_split` as BM25 and RM3, so it
+  uses dev only and checks for dev/test overlap. `--split test` isn't accepted.
+- Encodes each query once, on 1 thread by default (`--threads`), then runs an
+  exact cosine search at every dimension in `--dims`. Truncated vectors are
+  re-normalised. BM25 runs on the same queries.
+- Records:
+  - NDCG@10, MAP@10, Recall@100, Recall@1000 and MRR@10, using the same trec_eval
+  - a paired t-test, Wilcoxon test and wins/losses/ties against BM25
+  - latency (mean, p50 and p95), split into query encoding and search
+  - model load time, matrix size per dimension and peak RSS
+- Writes `results/dense/dev_results.json` and `dense_dev_<dim>.run`. Without
+  `--overwrite`, it refuses to replace them.
+
 ## Tests
 
 ```bash
@@ -369,6 +427,7 @@ python -m pytest -v
 | `test_search_app.py` | Web UI / JSON API trên index fixture |
 | `test_tune.py` | Tuning: grid, resume, TPE (skip nếu chưa cài Optuna), lỗi trial, metric so với tính tay |
 | `test_evaluate.py` | Evaluation: nạp qrels/queries, ghi TREC run, TrecEvaluator metrics |
+| `test_dense.py` | Dense: index (ID, chuẩn hoá), chặn ghi đè, search = brute force, Matryoshka, so với BM25, lỗi tải model, CLI tiến trình mới |
 | `test_evaluate_rm3.py` | RM3: so sánh BM25/RM3, L9 + 27 grid, resume, chỉ dev qrels, index thiếu docvectors, CLI tiến trình mới |
 
 `test_real_index.py` kiểm tra:
