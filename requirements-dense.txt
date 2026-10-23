@@ -1,0 +1,4 @@
+# Optional: dense retrieval (src/dense). Needs the model files from Hugging Face
+# (hotchpotch/bekko-embedding-v1-a8m) or a local copy passed with --model.
+# sentence-transformers 6.2.0 requires transformers>=5,<6 and torch>=2.2 (already pulled in by pyserini).
+sentence-transformers==6.2.0

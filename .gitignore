@@ -6,5 +6,6 @@ __pycache__/
 # Generated data and indexes are reproducible and not committed.
 data
 indexes/
+models/
 results/
 

@@ -144,18 +144,28 @@ def load_split(data_dir: Path, split: str) -> tuple[list[str], list[str], dict, 
 # Results bookkeeping
 # --------------------------------------------------------------------------
 
-class TrialLog:
-    """Append-only CSV of trials, plus the in-memory view used for resume."""
+def bm25_key(row: dict) -> tuple[float, float]:
+    return key(float(row["k1"]), float(row["b"]))
 
-    def __init__(self, path: Path, resume: bool):
+
+class TrialLog:
+    """Append-only CSV of trials, plus the in-memory view used for resume.
+
+    ``fields`` are the CSV columns and ``key_fn`` maps a row to the
+    configuration it evaluated; the defaults are the k1/b tuning ones.
+    """
+
+    def __init__(self, path: Path, resume: bool, fields: list[str] = CSV_FIELDS, key_fn=bm25_key):
         self.path = path
+        self.fields = fields
+        self.key_fn = key_fn
         self.rows: list[dict] = []
         if path.exists():
             if not resume:
-                sys.exit(f"[tune] {path} already exists. Pass --resume to continue it, or choose another --results-csv.")
+                sys.exit(f"[tune] {path} already exists. Pass --resume to continue it, or choose another output path.")
             with open(path, newline="", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
-                if reader.fieldnames != CSV_FIELDS:
+                if reader.fieldnames != fields:
                     sys.exit(f"[tune] {path} has unexpected columns {reader.fieldnames}; not resuming.")
                 self.rows = list(reader)
             print(f"[tune] Resuming from {path}: {len(self.completed)} completed trials, "
@@ -163,22 +173,22 @@ class TrialLog:
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "w", newline="", encoding="utf-8") as f:
-                csv.DictWriter(f, fieldnames=CSV_FIELDS).writeheader()
+                csv.DictWriter(f, fieldnames=fields).writeheader()
 
     @property
-    def completed(self) -> dict[tuple[float, float], dict]:
-        return {key(float(r["k1"]), float(r["b"])): r for r in self.rows if r["status"] == "ok"}
+    def completed(self) -> dict[tuple, dict]:
+        return {self.key_fn(r): r for r in self.rows if r["status"] == "ok"}
 
     def append(self, row: dict) -> None:
         row = {**row, "trial": len(self.rows) + 1}
         with open(self.path, "a", newline="", encoding="utf-8") as f:
-            csv.DictWriter(f, fieldnames=CSV_FIELDS).writerow(row)
+            csv.DictWriter(f, fieldnames=self.fields).writerow(row)
             f.flush()
             os.fsync(f.fileno())
         self.rows.append({k: str(v) for k, v in row.items()})
 
-    def best(self) -> dict | None:
-        ok = [r for r in self.rows if r["status"] == "ok"]
+    def best(self, rows: list[dict] | None = None) -> dict | None:
+        ok = [r for r in (self.rows if rows is None else rows) if r["status"] == "ok"]
         # Highest objective; earliest trial wins ties.
         return max(ok, key=lambda r: (float(r[OBJECTIVE]), -int(r["trial"]))) if ok else None
 

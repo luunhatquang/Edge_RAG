@@ -112,12 +112,16 @@ class TrecEvaluator:
     """
 
     def __init__(self, qrels: dict[str, dict[str, int]]):
+        # Importing Pyserini first puts the Anserini jar on the JVM classpath; starting
+        # the JVM through jnius directly would leave io.anserini.eval.TrecEval unloadable.
+        import pyserini.search.lucene  # noqa: F401
         from jnius import autoclass
 
         self._trec_eval = autoclass("io.anserini.eval.TrecEval")
         self._tmp = tempfile.TemporaryDirectory(prefix="trec_eval-")
         self.qrels_path = Path(self._tmp.name) / "qrels.txt"
         write_trec_qrels(qrels, self.qrels_path)
+        self._qids = sorted(qrels)
 
     def _run(self, args: list[str]) -> dict[str, float]:
         te = self._trec_eval()
@@ -147,6 +151,25 @@ class TrecEvaluator:
         if missing:
             raise RuntimeError(f"trec_eval did not report {sorted(missing)}")
         return {m: metrics[m] for m in METRICS}
+
+    def per_query(self, results: dict[str, list], measure: str = "ndcg_cut.10") -> dict[str, float]:
+        """Per-query values of one trec_eval measure; judged queries with no hits get 0."""
+        fd, run_path = tempfile.mkstemp(suffix=".run", dir=self._tmp.name)
+        os.close(fd)
+        try:
+            write_trec_run(results, Path(run_path))
+            te = self._trec_eval()
+            rows = te.runAndGetOutput(["-q", "-c", "-m", measure, str(self.qrels_path), run_path])
+            if te.getLastExitCode() != 0:
+                raise RuntimeError(f"trec_eval exited with code {te.getLastExitCode()}")
+        finally:
+            os.remove(run_path)
+        values = {qid: 0.0 for qid in self._qids}
+        for row in rows:
+            _, qid, value = list(row)
+            if qid != "all":
+                values[qid] = float(value)
+        return values
 
     def close(self) -> None:
         self._tmp.cleanup()
