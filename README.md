@@ -8,8 +8,10 @@ Research code for retrieval-augmented generation on edge devices, using the
 [Pyserini](https://github.com/castorini/pyserini) (stage 1), automatic BM25
 k1/b tuning on the dev split (stage 2), evaluation on the test split (stage 3),
 BM25 vs BM25+RM3 comparison and RM3 tuning on the dev split (stage 4), and dense
-retrieval with bekko-embedding-v1-a8m on the dev split (stage 5). Hybrid fusion
-(RRF) and LLM generation are not implemented yet.
+retrieval with bekko-embedding-v1-a8m on the dev split (stage 5), and hybrid
+RRF fusion of lexical and dense runs tuned on the dev split (stage 6), and a
+one-shot test-split evaluation of all four methods with the dev-selected
+configurations (stage 7). LLM generation is not implemented yet.
 
 ## Layout
 
@@ -22,6 +24,8 @@ src/bm25/tune.py              Automatic BM25 k1/b tuning on the dev split (grid 
 src/bm25/evaluate_rm3.py      BM25 vs BM25+RM3 on the dev split, RM3 grid tuning, latency/RAM cost
 src/dense/build_index.py      Encode the corpus with bekko-embedding-v1-a8m into a dense index (.npy)
 src/dense/evaluate_dense.py   Dense vs BM25 on the dev split, Matryoshka dims, latency/RAM cost
+src/hybrid/rrf.py             Weighted RRF fusion of dev runs (RM3/BM25 + dense), tuned on dev
+src/evaluate_test.py          One-shot test evaluation of BM25, RM3, dense, hybrid with dev-locked configs
 scripts/run_pipeline.sh       One-shot script: prepare → build → test
 scripts/test_retrieval.py     Chạy BM25 queries + tính nDCG@10 trên NFCorpus test split
 tests/test_prepare_data.py    Unit tests: corpus conversion, download, overwrite guard
@@ -29,6 +33,8 @@ tests/test_build_index.py     Integration test: build index trên 4-doc fixture
 tests/test_real_index.py      Integration test: kiểm tra index với dữ liệu NFCorpus thực
 tests/test_tune.py            Tuning tests trên fixture (grid, resume, TPE, lỗi trial, chặn test split)
 tests/test_evaluate.py        Unit/Integration tests cho pipeline đánh giá (test split)
+tests/test_evaluate_test.py   Chuỗi dev đầy đủ trên fixture rồi đánh giá test một lần (khoá cấu hình, chặn chạy lại)
+tests/test_hybrid.py          RRF tests trên run tự tạo (công thức, tune, resume, chặn run có query test)
 tests/test_dense.py           Dense tests với mô hình ModernBERT tí hon tạo offline (không cần tải bekko)
 tests/test_evaluate_rm3.py    RM3 tests trên fixture (so sánh, L9/27 grid, resume, chặn test split, index thiếu docvectors)
 results/bm25/index_build.json Build record (git-ignored)
@@ -37,6 +43,8 @@ results/bm25/best_config.json    Best k1/b on dev + metrics + environment (git-i
 results/bm25/nfcorpus_test.run   TREC run file trên test split (git-ignored)
 results/bm25/evaluation.json     Báo cáo metric chính thức trên test split (git-ignored)
 results/dense/                   Dense dev results: dev_results.json, dense_dev_<dim>.run (git-ignored)
+results/test/                    Test-split results: test_results.json + {bm25,rm3,dense,hybrid}_test.run (git-ignored)
+results/hybrid/                  Hybrid dev results: tuning_results.csv, dev_comparison.json, best_config.json, hybrid_dev.run (git-ignored)
 results/rm3/                     RM3 dev results: tuning_results.csv, dev_comparison.json, best_config.json, rm3_dev.run, bm25_dev.run (git-ignored)
 data/nfcorpus/                NFCorpus gốc (corpus.jsonl, queries.jsonl, qrels/)
 data/processed/nfcorpus/      corpus/docs.jsonl + manifest.json (git-ignored)
@@ -403,6 +411,89 @@ python -m src.dense.evaluate_dense --dims 384,256,128,64
 - Writes `results/dense/dev_results.json` and `dense_dev_<dim>.run`. Without
   `--overwrite`, it refuses to replace them.
 
+## Stage 6: hybrid retrieval with weighted RRF (dev split)
+
+`src/hybrid/rrf.py` fuses the dev runs already written by the earlier stages, so
+it doesn't need to search again or load a model:
+
+| name | default run file | written by |
+|---|---|---|
+| `bm25` | `results/rm3/bm25_dev.run` | `src.bm25.evaluate_rm3` |
+| `rm3` | `results/rm3/rm3_dev.run` | `src.bm25.evaluate_rm3` (best RM3 on dev) |
+| `dense` | `results/dense/dense_dev_384.run` | `src.dense.evaluate_dense` |
+
+Each document gets the score `score(d) = Σ_i w_i / (k + rank_i(d))`, using the top
+`--depth 1000` hits of each run. For `a+b`, `w_a = w` and `w_b = 1 − w`.
+
+```bash
+python -m src.hybrid.rrf                                   # rm3+dense and bm25+dense, k ∈ {10,20,40,60,100}, w ∈ {0.3..0.7}: 50 configs
+python -m src.hybrid.rrf --resume --k 5,10,20,40,60,100    # extend the grid, keeping finished configs
+python -m src.hybrid.rrf --combos rm3+dense --k 60 --weights 0.5 --out-dir results/hybrid_k60
+python -m src.hybrid.rrf --run dense=results/dense/dense_dev_256.run --out-dir results/hybrid_d256
+```
+
+- **Dev only.** Queries and qrels come from `tune.load_split`. A run file that
+  contains test query IDs, or IDs that aren't in `dev.tsv`, stops the run. Test
+  qrels are never used.
+- **Selection.** The best configuration has the highest dev NDCG@10. All five
+  metrics are recorded with the same `TrecEvaluator`. Per-query NDCG@10 is
+  compared with paired t-tests, Wilcoxon tests and wins/losses/ties for:
+  - the hybrid against each input
+  - each pair of inputs, for example `rm3_vs_dense`
+- **Latency.** Fusion time per query is measured. End-to-end latency is
+  estimated as component latency plus fusion time, assuming the retrievers run
+  one after the other. The component latencies are read from
+  `results/rm3/dev_comparison.json` and `results/dense/dev_results.json`.
+- **Outputs** go to `results/hybrid/`: `tuning_results.csv` (checkpoint,
+  `--resume`), `dev_comparison.json`, `best_config.json` and `hybrid_dev.run`.
+  Without `--resume`, the script refuses to overwrite them.
+
+The hybrid's dev score is optimistic, because it is chosen and measured on the
+same queries. Confirm it once on the test split.
+
+## Stage 7: one-shot evaluation on the test split
+
+Run this **once**, after stages 4–6 have chosen their configurations on dev:
+
+```bash
+python -m src.evaluate_test        # → results/test/test_results.json + {bm25,rm3,dense,hybrid}_test.run
+```
+
+The script has **no retrieval hyperparameter options**. Every setting comes from
+the dev results:
+
+| Method | Configuration read from |
+|---|---|
+| BM25 | `results/rm3/best_config.json` → `bm25_baseline` (k1, b) |
+| BM25 + RM3 | `results/rm3/best_config.json` → `best` (fb_docs, fb_terms, original_query_weight) |
+| Dense | `results/dense/dev_results.json` (model, index). The dimension is the dense run used in `results/hybrid/dev_comparison.json` |
+| Hybrid | `results/hybrid/best_config.json` → `best` (combination, k, weights, depth) |
+
+**Checks before it runs.** It stops if:
+
+- any of those files wasn't selected on `dev`
+- the BM25 k1/b in the RM3 and dense files disagree
+- the dense dimension wasn't evaluated on dev
+
+It records the SHA-256 of every configuration file it reads.
+
+**How it measures.** All four methods run on the same 323 test queries, one
+query at a time on one thread, after a warm-up on **dev** queries. Hybrid fuses
+the component results of each query with the same `rrf()` used on dev, and its
+latency is measured as the components plus fusion, run one after the other.
+
+**What it reports:**
+
+- all five trec_eval metrics
+- paired t-tests, Wilcoxon tests and wins/losses/ties for hybrid against each
+  method and for each pair of methods
+- latency (mean, p50, p95) and fusion time
+- Lucene init time, model load time, embedding matrix size and peak RSS
+- versions and git commit
+
+If `results/test/` already has results, it refuses to run. `--overwrite`
+replaces them and records that it did; `--out-dir` writes somewhere else.
+
 ## Tests
 
 ```bash
@@ -427,6 +518,8 @@ python -m pytest -v
 | `test_search_app.py` | Web UI / JSON API trên index fixture |
 | `test_tune.py` | Tuning: grid, resume, TPE (skip nếu chưa cài Optuna), lỗi trial, metric so với tính tay |
 | `test_evaluate.py` | Evaluation: nạp qrels/queries, ghi TREC run, TrecEvaluator metrics |
+| `test_evaluate_test.py` | Test split: chuỗi dev đầy đủ → khoá cấu hình, hybrid = RRF của các run test, không có cờ tune, chặn cấu hình lệch/không phải dev, chặn chạy lại |
+| `test_hybrid.py` | Hybrid RRF: công thức tính tay, tune + đầu ra, resume, chặn run chứa query test/lạ, CLI tiến trình mới |
 | `test_dense.py` | Dense: index (ID, chuẩn hoá), chặn ghi đè, search = brute force, Matryoshka, so với BM25, lỗi tải model, CLI tiến trình mới |
 | `test_evaluate_rm3.py` | RM3: so sánh BM25/RM3, L9 + 27 grid, resume, chỉ dev qrels, index thiếu docvectors, CLI tiến trình mới |
 
